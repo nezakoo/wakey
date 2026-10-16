@@ -45,7 +45,6 @@ final class App: NSObject, NSApplicationDelegate, NSMenuDelegate {
     func render(_ output: String) {
         let lines = output.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
         statusItem.button?.image = titleImage(parseLine(lines[0]))
-        statusItem.button?.title = ""
         if menuOpen { return }
 
         let menu = NSMenu()
