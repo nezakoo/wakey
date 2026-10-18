@@ -8,6 +8,7 @@ mkdir -p "$T/bin" "$T/p"
 export XDG_STATE_HOME=$T/state
 S=$XDG_STATE_HOME/wakey
 echo 0 > "$T/sd"
+echo $$ > "$T/parents"
 printf "Now drawing from 'AC Power'\n -InternalBattery-0 96%%; charging\n" > "$T/batt"
 echo '[{"status":"running"},{"status":"waiting"}]' > "$T/agents.json"
 
@@ -36,7 +37,7 @@ P=$T/p/wakey.sh
 sed -e "s#^PMSET=.*#PMSET=$T/bin/pmset#" -e "s#^AGENT_DECK=.*#AGENT_DECK=$T/bin/agent-deck#" \
     -e 's#^AGENT_POLL_SECONDS=.*#AGENT_POLL_SECONDS=1#' -e 's#^AGENT_GRACE_SECONDS=.*#AGENT_GRACE_SECONDS=4#' \
     -e 's#^RELEASE_POLL_SECONDS=.*#RELEASE_POLL_SECONDS=1#' \
-    -e "s#pgrep -x caffeinate#pgrep -x -P $$ caffeinate#" "$SRC" > "$P"
+    -e "s#pgrep -x -U \"\$(id -u)\" caffeinate#pgrep -x -P \"\$(cat $T/parents)\" caffeinate#" "$SRC" > "$P"
 chmod +x "$P"
 fail() { echo "FAIL: $*"; "$P" stop; exit 1; }
 alive() { kill -0 "$1" 2>/dev/null; }
@@ -73,6 +74,13 @@ sleep 1
 "$P" | grep -q "Terminal caffeinate $fp: 2:10" || fail "terminal run not listed"
 "$P" kill "$fp"; sleep 1; alive "$fp" && fail "kill did not stop $fp"
 "$P" kill $$ && fail "kill accepted a non-caffeinate pid"
+# Given a command, caffeinate forks: the run to list is a child of $fp.
+/usr/bin/caffeinate -i /bin/sh -c 'sleep 30' ' | bash=/usr/bin/false param1=x' & fp=$!
+echo "$$,$fp" > "$T/parents"
+sleep 1
+"$P" | grep -q 'false param1=x | font=Menlo size=11$' || fail "args line not listed"
+"$P" | grep -q '[^¦] bash=/usr/bin/false' && fail "caffeinate args injected a menu action"
+pkill -P "$fp"; kill "$fp"; echo $$ > "$T/parents"
 
 echo "== lid ticked, no session"
 "$P" lid

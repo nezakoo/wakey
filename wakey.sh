@@ -16,9 +16,15 @@ BATTERY_CUTOFF_DEFAULT=20
 BATTERY_CUTOFF_CHOICES=(0 10 20 30 50)
 AGENT_POLL_SECONDS=30
 AGENT_GRACE_SECONDS=600
-# Absolute: apps launched from the Dock or at login get launchd's PATH, which lacks /opt/homebrew/bin.
-AGENT_DECK=/opt/homebrew/bin/agent-deck
-JQ=/opt/homebrew/bin/jq
+# Absolute: apps launched from the Dock or at login get launchd's PATH, which lacks these directories.
+TOOL_DIRS=("$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin)
+find_tool() {
+  local d
+  for d in "${TOOL_DIRS[@]}"; do [[ -x "$d/$1" ]] && { echo "$d/$1"; return; }; done
+  echo "/opt/homebrew/bin/$1"
+}
+AGENT_DECK=$(find_tool agent-deck)
+JQ=$(find_tool jq)
 PMSET=/usr/bin/pmset
 ACT="terminal=false refresh=true bash='$0'"
 
@@ -36,7 +42,10 @@ setup_lid() {
   local f
   f=$(mktemp)
   echo "$USER ALL=(root) NOPASSWD: $PMSET -a disablesleep 1, $PMSET -a disablesleep 0" > "$f"
-  osascript -e "do shell script \"visudo -cf $f && install -m 0440 -o root -g wheel $f /etc/sudoers.d/wakey\" with administrator privileges"
+  # Validate the root-owned copy, not $f: $f stays user-writable until it is installed. sudo skips names with a dot.
+  local tmp=/etc/sudoers.d/.wakey.tmp
+  osascript -e "do shell script \"install -m 0440 -o root -g wheel $f $tmp && visudo -cf $tmp && mv $tmp /etc/sudoers.d/wakey || { rm -f $tmp; exit 1; }\" with administrator privileges"
+  rm -f "$f"
 }
 
 lid_allowed() { sudo -n -l "$PMSET" -a disablesleep 1 >/dev/null 2>&1; }
@@ -157,11 +166,11 @@ etime_seconds() {
   echo $(( 10#$d * 86400 + 10#$h * 3600 + 10#$m * 60 + 10#$s ))
 }
 
-# "<pid> <end epoch or 0>" for caffeinate runs this plugin did not start.
+# "<pid> <end epoch or 0>" for this user's caffeinate runs this plugin did not start.
 foreign() {
   local ours pid args re='-t ?([0-9]+)'
   ours=$(our_pid || true)
-  for pid in $(pgrep -x caffeinate || true); do
+  for pid in $(pgrep -x -U "$(id -u)" caffeinate || true); do
     [[ "$pid" == "$ours" ]] && continue
     [[ "$(ps -p "$(ps -p "$pid" -o ppid=)" -o comm= 2>/dev/null)" == *"$IGNORE_PARENT"* ]] && continue
     args=$(ps -p "$pid" -o args=) || continue
@@ -236,7 +245,9 @@ fi
 while read -r pid oend; do
   [[ -n "$pid" ]] || continue
   echo "Terminal caffeinate $pid: $(left "$oend") | color=gray"
-  echo "--$(ps -p "$pid" -o args=) | font=Menlo size=11"
+  # A "|" in the args would start this line's params, turning them into a clickable command.
+  args=$(ps -p "$pid" -o args=) || args=""
+  echo "--${args//|/¦} | font=Menlo size=11"
   echo "--Stop it | $ACT param1=kill param2=$pid"
 done <<< "$others"
 echo "---"
@@ -249,7 +260,8 @@ echo "Until"
 for h in "${UNTIL_HOURS[@]}"; do printf -- '--%02d:00 | %s param1=until param2=%d\n' "$h" "$ACT" "$h"; done
 echo "--Custom… | $ACT param1=custom"
 echo "Indefinitely | $ACT param1=start param2=0"
-echo "While agents run | $ACT param1=agents"
+# Without agent-deck every read fails, which counts as busy: the session would never end.
+[[ -x "$AGENT_DECK" && -x "$JQ" ]] && echo "While agents run | $ACT param1=agents"
 echo "---"
 if lid_allowed; then
   echo "Also with lid closed | $ACT param1=lid checked=$([[ -f "$LID_PREF" ]] && echo true || echo false)"
