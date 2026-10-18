@@ -58,3 +58,7 @@ SwiftBar/xbar text format, so it also runs as a SwiftBar plugin. `Wakey.app` run
 and renders that output natively.
 
 Tests: `tests/engine-test.sh` runs the engine against fake `pmset`, `sudo` and `agent-deck`.
+
+## License
+
+MIT, see [LICENSE](LICENSE).
