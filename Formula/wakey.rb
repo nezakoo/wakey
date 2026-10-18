@@ -3,9 +3,9 @@
 class Wakey < Formula
   desc "Menu-bar app that keeps the Mac awake, also while AI agents or a process run"
   homepage "https://github.com/nezakoo/wakey"
-  url "https://github.com/nezakoo/wakey/releases/download/v0.0.0/wakey.tar.gz"
-  version "0.0.0"
-  sha256 "0000000000000000000000000000000000000000000000000000000000000000"
+  url "https://github.com/nezakoo/wakey/releases/download/v1.0.0/wakey.tar.gz"
+  version "1.0.0"
+  sha256 "b510d967fb78f8aa216339a779f715917efc3112a1e8ffd6a37309191fd69a3d"
   license "MIT"
 
   depends_on macos: :ventura
