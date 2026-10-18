@@ -1,0 +1,17 @@
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build
+        run: ./build.sh
+      - name: Engine tests
+        run: |
+          command -v jq || brew install jq
+          tests/engine-test.sh

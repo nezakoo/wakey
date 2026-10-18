@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# Builds Wakey from source and installs it: curl -fsSL https://raw.githubusercontent.com/nezakoo/wakey/main/install.sh | bash
+# Builds the latest Wakey release from source and installs it:
+#   curl -fsSL https://raw.githubusercontent.com/nezakoo/wakey/main/install.sh | bash
+# WAKEY_TARBALL overrides the source, e.g. https://github.com/nezakoo/wakey/archive/refs/heads/main.tar.gz
 set -euo pipefail
 
-TARBALL=https://github.com/nezakoo/wakey/archive/refs/heads/main.tar.gz
+TARBALL=${WAKEY_TARBALL:-https://github.com/nezakoo/wakey/releases/latest/download/wakey.tar.gz}
 APP=/Applications/Wakey.app
 
 xcode-select -p >/dev/null 2>&1 || { echo "Needs the Xcode Command Line Tools: xcode-select --install" >&2; exit 1; }

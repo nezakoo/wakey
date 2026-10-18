@@ -1,0 +1,3 @@
+Formula export-ignore
+.github export-ignore
+tools/release.sh export-ignore

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Runs a copy of wakey.sh against fake pmset/sudo/agent-deck, so no real setting changes.
+# Runs a copy of wakey.sh against fake pmset/sudo/agent-deck/osascript, so no real setting changes.
 # The copy only sees caffeinate runs started by this test, so live sessions cannot skew it.
 set -u
 SRC="$(cd "$(dirname "$0")/.." && pwd)/wakey.sh"
@@ -31,12 +31,16 @@ cat > "$T/bin/agent-deck" <<EOF
 [[ -f "$T/agents_fail" ]] && exit 1
 cat "$T/agents.json"
 EOF
+cat > "$T/bin/osascript" <<EOF
+#!/bin/bash
+printf '%s\n' "\${@: -1}" >> "$T/osascript.log"
+EOF
 chmod +x "$T/bin/"*
 export PATH="$T/bin:$PATH"
 P=$T/p/wakey.sh
 sed -e "s#^PMSET=.*#PMSET=$T/bin/pmset#" -e "s#^AGENT_DECK=.*#AGENT_DECK=$T/bin/agent-deck#" \
     -e 's#^AGENT_POLL_SECONDS=.*#AGENT_POLL_SECONDS=1#' -e 's#^AGENT_GRACE_SECONDS=.*#AGENT_GRACE_SECONDS=4#' \
-    -e 's#^RELEASE_POLL_SECONDS=.*#RELEASE_POLL_SECONDS=1#' \
+    -e 's#^GUARD_POLL_SECONDS=.*#GUARD_POLL_SECONDS=1#' \
     -e "s#pgrep -x -U \"\$(id -u)\" caffeinate#pgrep -x -P \"\$(cat $T/parents)\" caffeinate#" "$SRC" > "$P"
 chmod +x "$P"
 fail() { echo "FAIL: $*"; "$P" stop; exit 1; }
@@ -49,7 +53,7 @@ echo "== idle"
 echo "== start, stop, timer"
 "$P" start 60; read -r p0 _ < "$S/state"
 ps -p "$p0" -o args= | grep -q "caffeinate -dis -t 60" || fail "caffeinate not started"
-[[ "$(title)" == "0:01 | sfimage=eye.fill" ]] || fail "timed title: $(title)"
+[[ "$(title)" == "0:01 | sfimage=eye.fill end="* ]] || fail "timed title: $(title)"
 "$P" stop; sleep 1; alive "$p0" && fail "stop left $p0 running"
 "$P" start 2; read -r p0 _ < "$S/state"; sleep 4
 alive "$p0" && fail "timer did not expire"
@@ -89,7 +93,7 @@ echo "== lid ticked, no session"
 echo "== lid with a session"
 "$P" start 2; read -r pl _ < "$S/state"
 [[ "$(cat "$T/sd")" == 1 ]] || fail "disablesleep not set"
-[[ "$(title)" == *":laptopcomputer: | sfimage=eye.fill" ]] || fail "lid title: $(title)"
+[[ "$(title)" == *":laptopcomputer: | sfimage=eye.fill end="* ]] || fail "lid title: $(title)"
 sleep 5
 [[ "$(cat "$T/sd")" == 0 ]] || fail "watcher did not reset lid after expiry"
 "$P" start 60; "$P" start 60; sleep 3
@@ -129,5 +133,35 @@ printf "Now drawing from 'Battery Power'\n -InternalBattery-0 25%%; discharging\
 "$P" battery 30; "$P" >/dev/null; sleep 1
 alive "$pc" && fail "30% cutoff did not stop at 25%"
 "$P" | grep -q "Battery cutoff: below 30%" || fail "30 label"
+
+echo "== battery cutoff without the app"
+printf "Now drawing from 'AC Power'\n -InternalBattery-0 25%%; charging\n" > "$T/batt"
+"$P" start 600; read -r pg _ < "$S/state"
+printf "Now drawing from 'Battery Power'\n -InternalBattery-0 25%%; discharging\n" > "$T/batt"
+sleep 3
+alive "$pg" && fail "guard did not stop at 25% below a 30% cutoff"
+[[ "$(cat "$T/sd")" == 0 ]] || fail "guard did not reset lid on battery stop"
+grep -q "battery below 30%" "$T/osascript.log" || fail "no battery notification"
+printf "Now drawing from 'AC Power'\n -InternalBattery-0 96%%; charging\n" > "$T/batt"
+
+echo "== timed title carries end="
+"$P" start 600; read -r _ e _ < "$S/state"
+[[ "$(title)" == "0:10 :laptopcomputer: | sfimage=eye.fill end=$e" ]] || fail "end title: $(title)"
+"$P" stop
+
+echo "== while a process runs"
+"$P" | grep -q '^--Other… .*param1=process-custom' || fail "process submenu missing"
+sleep 30 & wp=$!
+"$P" process "$wp"; read -r pw _ m t < "$S/state"
+[[ "$m $t" == "process $wp" ]] || fail "process state: $m $t"
+ps -p "$pw" -o args= | grep -q -- "-w $wp" || fail "caffeinate not waiting on $wp"
+[[ "$(title)" == ":hourglass: :laptopcomputer: | sfimage=eye.fill" ]] || fail "process title: $(title)"
+"$P" | grep -q "Awake while sleep runs (PID $wp)" || fail "process line missing"
+kill "$wp"; sleep 3
+alive "$pw" && fail "session outlived the process"
+[[ "$(cat "$T/sd")" == 0 ]] || fail "lid not released after process ended"
+"$P" process 999999 && fail "accepted a missing pid"
+"$P" process 1 && fail "accepted another user's process"
+grep -q "No process of yours with PID 1" "$T/osascript.log" || fail "no alert for pid 1"
 
 echo "ALL PASS"

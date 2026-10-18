@@ -9,13 +9,14 @@ LID_SET="$STATE_DIR/lid-set"
 UNTIL_HOURS=(7 8 9 10 12 18 22 0)
 # Claude Code holds `caffeinate -i -t 300` while it works; those are not runs to show.
 IGNORE_PARENT=claude
-RELEASE_POLL_SECONDS=5
+GUARD_POLL_SECONDS=15
 EXTEND_SECONDS=3600
 BATTERY_PREF="$STATE_DIR/battery-cutoff"
 BATTERY_CUTOFF_DEFAULT=20
 BATTERY_CUTOFF_CHOICES=(0 10 20 30 50)
 AGENT_POLL_SECONDS=30
 AGENT_GRACE_SECONDS=600
+PROCESS_CHOICES=5
 # Absolute: apps launched from the Dock or at login get launchd's PATH, which lacks these directories.
 TOOL_DIRS=("$HOME/.local/bin" /opt/homebrew/bin /usr/local/bin)
 find_tool() {
@@ -27,6 +28,11 @@ AGENT_DECK=$(find_tool agent-deck)
 JQ=$(find_tool jq)
 PMSET=/usr/bin/pmset
 ACT="terminal=false refresh=true bash='$0'"
+
+# Text goes in as an argument, never into the AppleScript source.
+notify() { osascript -e 'on run argv' -e 'display notification (item 1 of argv) with title "Wakey"' -e 'end run' "$1" || true; }
+alert() { osascript -e 'on run argv' -e 'display alert (item 1 of argv)' -e 'end run' "$1" || true; }
+ask() { osascript -e 'on run argv' -e 'text returned of (display dialog (item 1 of argv) default answer (item 2 of argv))' -e 'end run' "$1" "$2"; }
 
 is_caffeinate() { [[ "$(ps -p "$1" -o comm= 2>/dev/null)" == *caffeinate ]]; }
 
@@ -57,14 +63,19 @@ lid_off() {
   sudo -n "$PMSET" -a disablesleep 0 && rm -f "$LID_SET"
 }
 
-# The watcher, not the caller, undoes disablesleep: a session can end by timer while nothing else is running.
-lid_hold() {
-  lid_on
-  nohup "$0" release "$1" >/dev/null 2>&1 &
-}
-
-release() {
-  while kill -0 "$1" 2>/dev/null; do sleep "$RELEASE_POLL_SECONDS"; done
+# Runs beside every session, so the battery cutoff and the lid reset hold after Wakey.app quits or crashes,
+# and when a session ends by timer while nothing else is running.
+guard() {
+  while kill -0 "$1" 2>/dev/null; do
+    if battery_low; then
+      if [[ "$(our_pid || true)" == "$1" ]]; then
+        stop
+        notify "Stopped keeping awake: battery below $(battery_cutoff)%"
+      fi
+      return
+    fi
+    sleep "$GUARD_POLL_SECONDS"
+  done
   our_pid >/dev/null || lid_off
 }
 
@@ -75,18 +86,21 @@ stop() {
   lid_off
 }
 
+# State: "<caffeinate pid> <end epoch or 0> <mode> [watched pid]".
 start() {
-  local seconds=$1 mode=${2:-timed} args=(-dis) end=0 pid
+  local seconds=$1 mode=${2:-timed} target=${3:-} args=(-dis) end=0 pid
   stop
   mkdir -p "$STATE_DIR"
   if [[ "$seconds" != 0 ]]; then
     args+=(-t "$seconds")
     end=$(( $(date +%s) + seconds ))
   fi
+  if [[ -n "$target" ]]; then args+=(-w "$target"); fi
   nohup /usr/bin/caffeinate "${args[@]}" >/dev/null 2>&1 &
   pid=$!
-  echo "$pid $end $mode" > "$STATE"
-  if [[ -f "$LID_PREF" ]]; then lid_hold "$pid"; fi
+  echo "$pid $end $mode $target" > "$STATE"
+  if [[ -f "$LID_PREF" ]]; then lid_on || true; fi
+  nohup "$0" guard "$pid" >/dev/null 2>&1 &
   if [[ "$mode" == agents ]]; then nohup "$0" agents-watch "$pid" >/dev/null 2>&1 & fi
 }
 
@@ -138,12 +152,48 @@ seconds_until() {
 
 custom() {
   local hhmm re='^([01]?[0-9]|2[0-3]):([0-5][0-9])$'
-  hhmm=$(osascript -e 'text returned of (display dialog "Keep awake until (HH:MM)" default answer "09:00")') || return 0
+  hhmm=$(ask "Keep awake until (HH:MM)" "09:00") || return 0
   if [[ ! "$hhmm" =~ $re ]]; then
-    osascript -e "display alert \"Expected HH:MM, got: $hhmm\""
+    alert "Expected HH:MM, got: $hhmm"
     return 1
   fi
   start "$(seconds_until "${BASH_REMATCH[1]}" "${BASH_REMATCH[2]}")"
+}
+
+# Menu text: a "|" would start the line's params, turning them into a clickable command.
+safe() { local s=${1//|/¦}; echo "${s//$'\n'/ }"; }
+
+process_name() { local c; c=$(ps -p "$1" -o comm=) && safe "${c##*/}"; }
+
+# "<pid> <cpu%> <name>" for this user's busiest processes, Wakey's own excluded.
+busy_processes() {
+  local pid cpu comm name n=0
+  while read -r pid cpu comm; do
+    name=${comm##*/}
+    [[ "$pid" == "$$" || "$pid" == "$PPID" || "$name" == ps || "$name" == caffeinate ]] && continue
+    echo "$pid $cpu $(safe "$name")"
+    (( ++n < PROCESS_CHOICES )) || break
+  done < <(ps -U "$(id -u)" -r -o pid=,pcpu=,comm=)
+}
+
+watch_process() {
+  if [[ ! "$1" =~ ^[0-9]+$ ]] || ! kill -0 "$1" 2>/dev/null; then
+    alert "No process of yours with PID $1"
+    return 1
+  fi
+  start 0 process "$1"
+}
+
+process_custom() {
+  local answer pid
+  answer=$(ask "Keep awake while this process runs (name or PID)" "") || return 0
+  if [[ "$answer" =~ ^[0-9]+$ ]]; then
+    pid=$answer
+  elif ! pid=$(pgrep -n -x -U "$(id -u)" -- "$answer"); then
+    alert "No running process of yours named: $answer"
+    return 1
+  fi
+  watch_process "$pid"
 }
 
 toggle_lid() {
@@ -154,7 +204,7 @@ toggle_lid() {
     lid_off
   else
     touch "$LID_PREF"
-    if pid=$(our_pid); then lid_hold "$pid"; fi
+    if our_pid >/dev/null; then lid_on || true; fi
   fi
 }
 
@@ -197,7 +247,9 @@ case "${1:-}" in
   lid) toggle_lid; exit ;;
   setup-lid) setup_lid; exit ;;
   battery) mkdir -p "$STATE_DIR"; echo "$2" > "$BATTERY_PREF"; exit ;;
-  release) release "$2"; exit ;;
+  guard) guard "$2"; exit ;;
+  process) watch_process "$2"; exit ;;
+  process-custom) process_custom; exit ;;
   extend) extend; exit ;;
   agents) start 0 agents; exit ;;
   agents-watch) agents_watch "$2"; exit ;;
@@ -207,9 +259,9 @@ ours=""
 if ours=$(our_pid) && battery_low; then
   stop
   ours=""
-  osascript -e "display notification \"Stopped keeping awake: battery below $(battery_cutoff)%\" with title \"Wakey\""
+  notify "Stopped keeping awake: battery below $(battery_cutoff)%"
 fi
-if [[ -n "$ours" ]]; then read -r _ end mode < "$STATE"; else rm -f "$STATE"; lid_off; fi
+if [[ -n "$ours" ]]; then read -r _ end mode target < "$STATE"; else rm -f "$STATE"; lid_off; fi
 others=$(foreign)
 lid=""
 [[ "$("$PMSET" -g | awk '/SleepDisabled/ {print $2}')" == 1 ]] && lid=":laptopcomputer:"
@@ -219,10 +271,13 @@ if [[ -n "$ours" ]]; then
 elif [[ -n "$others" ]]; then
   title_end=$(awk '{ if ($2 == 0) z = 1; else if ($2 > m) m = $2 } END { print z ? 0 : m }' <<< "$others")
 fi
+# end= lets Wakey.app warn before a timed session of its own runs out.
 if [[ "${mode:-}" == agents ]]; then
   echo ":sparkles:${lid:+ $lid} | sfimage=eye.fill"
+elif [[ "${mode:-}" == process ]]; then
+  echo ":hourglass:${lid:+ $lid} | sfimage=eye.fill"
 elif [[ -n "${title_end:-}" ]]; then
-  echo "$(left "$title_end")${lid:+ $lid} | sfimage=eye.fill"
+  echo "$(left "$title_end")${lid:+ $lid} | sfimage=eye.fill${ours:+ end=$end}"
 elif [[ -z "$lid" && -f "$LID_PREF" ]]; then
   echo "·:laptopcomputer: | sfimage=eye.slash"
 else
@@ -234,6 +289,8 @@ echo "---"
 if [[ -n "$ours" ]]; then
   if [[ "$mode" == agents ]]; then
     echo "Awake while agents run: $(agents_running || echo '?') running"
+  elif [[ "$mode" == process ]]; then
+    echo "Awake while $(process_name "$target" || echo "process $target") runs (PID $target)"
   elif [[ "$end" == 0 ]]; then
     echo "Awake indefinitely"
   else
@@ -247,7 +304,7 @@ while read -r pid oend; do
   echo "Terminal caffeinate $pid: $(left "$oend") | color=gray"
   # A "|" in the args would start this line's params, turning them into a clickable command.
   args=$(ps -p "$pid" -o args=) || args=""
-  echo "--${args//|/¦} | font=Menlo size=11"
+  echo "--$(safe "$args") | font=Menlo size=11"
   echo "--Stop it | $ACT param1=kill param2=$pid"
 done <<< "$others"
 echo "---"
@@ -262,6 +319,11 @@ echo "--Custom… | $ACT param1=custom"
 echo "Indefinitely | $ACT param1=start param2=0"
 # Without agent-deck every read fails, which counts as busy: the session would never end.
 [[ -x "$AGENT_DECK" && -x "$JQ" ]] && echo "While agents run | $ACT param1=agents"
+echo "While a process runs"
+while read -r pid cpu name; do
+  echo "--$name ($pid) · ${cpu%.*}% CPU | $ACT param1=process param2=$pid"
+done < <(busy_processes)
+echo "--Other… | $ACT param1=process-custom"
 echo "---"
 if lid_allowed; then
   echo "Also with lid closed | $ACT param1=lid checked=$([[ -f "$LID_PREF" ]] && echo true || echo false)"
