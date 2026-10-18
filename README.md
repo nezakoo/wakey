@@ -6,6 +6,8 @@ A macOS menu-bar app that keeps the Mac awake while your AI coding agents work, 
 once they are done. It also keeps it awake while any process runs, for a set time, until a clock
 time, or with the lid closed.
 
+<img src="docs/menu.gif" alt="Wakey's menu: process and Until submenus, a 3-hour session, then awake while agents run" width="540">
+
 ## Install
 
 Needs macOS 13+ and the Xcode Command Line Tools (`xcode-select --install`). Wakey is built from
